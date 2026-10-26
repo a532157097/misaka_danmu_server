@@ -72,6 +72,42 @@ from .danmaku_filter import apply_blacklist_filter
 
 logger = logging.getLogger(__name__)
 
+
+async def resolve_library_episode_to_source_index(
+    title_recognition_manager,
+    library_episode: Optional[int],
+    provider: Optional[str],
+    titles: List[Optional[str]],
+) -> Optional[int]:
+    """把库内集号反查成源站集号。没有集数偏移规则时返回原集号。
+
+    自动后备匹配写入的 episodeId 编码的是偏移后的库内集号。下载弹幕必须用源站集号
+    去对分集列表，否则会取到偏移前的那一集。
+    """
+    if library_episode is None or library_episode < 1 or title_recognition_manager is None:
+        return library_episode
+
+    seen = set()
+    for title in titles:
+        if not title or title in seen:
+            continue
+        seen.add(title)
+        try:
+            source_episode = await title_recognition_manager.reverse_episode_offset(
+                title, library_episode, provider
+            )
+        except Exception as e:
+            logger.warning(
+                f"后备匹配反向偏移失败: title={title}, episode={library_episode}, 错误: {e}"
+            )
+            continue
+        if source_episode != library_episode:
+            logger.info(
+                f"后备匹配反向偏移: '{title}' 库内第{library_episode}集 => 源站第{source_episode}集"
+            )
+            return source_episode
+    return library_episode
+
 # 创建评论路由器
 comments_router = APIRouter(route_class=DandanApiRoute)
 
@@ -375,6 +411,14 @@ async def get_comments_for_dandan(
             fallback_info = await get_db_cache(session, FALLBACK_SEARCH_CACHE_PREFIX, fallback_episode_cache_key)
             if fallback_info:
                 episode_number = fallback_info.get("episode_number")
+        elif episodeId >= 25000000000000 and fallback_info.get("source_episode_number") is None:
+            # 整部剧缓存不含单集源站集号。单集映射里如果已经算过，优先用它。
+            per_episode_info = await get_db_cache(
+                session, FALLBACK_SEARCH_CACHE_PREFIX, f"fallback_episode_{episodeId}"
+            )
+            if isinstance(per_episode_info, dict) and per_episode_info.get("source_episode_number") is not None:
+                fallback_info = dict(fallback_info)
+                fallback_info["source_episode_number"] = per_episode_info["source_episode_number"]
 
         # DB 兜底：缓存全部 miss 但 episodeId 编码的 (animeId, sourceOrder) 在库中真实存在时，
         # 直接从 Anime + AnimeSource 反查 provider/mediaId 重建后备信息。
@@ -438,7 +482,30 @@ async def get_comments_for_dandan(
             year = fallback_info.get("year")
 
             # 步骤1：获取分集信息（先验证能拿到数据，再创建数据库条目）
-            logger.info(f"开始获取分集信息: provider={provider}, mediaId={mediaId}, episode_number={episode_number}")
+            # episodeId / 映射里的集号是库内集号。有集数偏移时要先反查源站集号再取分集，
+            # 入库仍使用库内集号，避免第195话被写成源站第196集或取到上一话的弹幕。
+            mapped_source_episode = fallback_info.get("source_episode_number")
+            source_episode_number = None
+            if mapped_source_episode is not None:
+                try:
+                    source_episode_number = int(mapped_source_episode)
+                except (TypeError, ValueError):
+                    source_episode_number = None
+            if source_episode_number is None:
+                source_episode_number = await resolve_library_episode_to_source_index(
+                    title_recognition_manager,
+                    episode_number,
+                    provider,
+                    [display_title, final_title],
+                )
+            elif source_episode_number != episode_number:
+                logger.info(
+                    f"后备匹配使用已记录的源站集号: 库内第{episode_number}集 => 源站第{source_episode_number}集"
+                )
+            logger.info(
+                f"开始获取分集信息: provider={provider}, mediaId={mediaId}, "
+                f"库内集数={episode_number}, 源站集数={source_episode_number}"
+            )
 
             # 获取scraper（后续弹幕下载任务需要）
             scraper = scraper_manager.get_scraper(provider)
@@ -451,15 +518,18 @@ async def get_comments_for_dandan(
                     await _release_coalesce(episodeId)
                     return models.CommentResponse(count=0, comments=[])
 
-                # 按 episodeIndex 精确查找目标分集（不能用位置索引，因为可能缺集）
+                # 按源站 episodeIndex 精确查找目标分集（不能用位置索引，因为可能缺集）
                 target_episode = None
                 for ep in episodes_list:
-                    if ep.episodeIndex == episode_number:
+                    if ep.episodeIndex == source_episode_number:
                         target_episode = ep
                         break
 
                 if not target_episode:
-                    logger.error(f"分集列表中未找到第{episode_number}集（共{len(episodes_list)}条记录），跳过创建数据库条目")
+                    looked_up = f"源站第{source_episode_number}集"
+                    if source_episode_number != episode_number:
+                        looked_up += f"（库内第{episode_number}集）"
+                    logger.error(f"分集列表中未找到{looked_up}（共{len(episodes_list)}条记录），跳过创建数据库条目")
                     await _release_coalesce(episodeId)
                     return models.CommentResponse(count=0, comments=[])
                 provider_episode_id = target_episode.episodeId

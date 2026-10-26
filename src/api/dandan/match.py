@@ -338,6 +338,18 @@ async def get_match_for_item(
             if time.time() - cached_time < 3600:  # 1小时内
                 logger.info(f"整季缓存命中: {season_cache_key}，复用匹配结果（跳过搜索）")
                 episode_number = parsed_info.get("episode") or 1
+                # 整季缓存里的集号是文件/库内集号。记下反查后的源站集号，下载时才能取到对应话数。
+                source_episode_number = episode_number
+                if title_recognition_manager and episode_number is not None:
+                    try:
+                        reversed_ep = await title_recognition_manager.reverse_episode_offset(
+                            parsed_info["title"], episode_number, season_cache.get("provider")
+                        )
+                        if reversed_ep != episode_number:
+                            logger.info(f"整季缓存反向偏移: 文件集号{episode_number} => 源站集号{reversed_ep}")
+                            source_episode_number = reversed_ep
+                    except Exception as e:
+                        logger.warning(f"整季缓存反向偏移失败，使用原始集号: {e}")
 
                 # 从缓存中恢复匹配信息
                 cached_provider = season_cache["provider"]
@@ -359,6 +371,7 @@ async def get_match_for_item(
                     "provider": cached_provider,
                     "mediaId": cached_mediaId,
                     "episode_number": episode_number,
+                    "source_episode_number": source_episode_number,
                     "final_title": cached_title,
                     "original_title": season_cache.get("original_title", cached_title),
                     "final_season": cached_season,
@@ -1123,6 +1136,7 @@ async def get_match_for_item(
                     "provider": best_match.provider,
                     "mediaId": best_match.mediaId,
                     "episode_number": final_episode_number,  # 使用final_episode_number (电影为1)
+                    "source_episode_number": source_episode_number,
                     "final_title": final_title,
                     "original_title": best_match.title,
                     "final_season": final_season,
