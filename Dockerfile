@@ -95,9 +95,15 @@ RUN set -ex \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# 从 python-builder 阶段将安装好的包复制到系统 site-packages 目录
-# 注意：路径中的 python3.12 需要与基础镜像的Python版本匹配
-COPY --from=python-builder /install /usr/local/lib/python3.12/site-packages
+# 从 python-builder 阶段将安装好的包复制到运行时 Python 的 site-packages。
+# 不用写死 python3.12：基础镜像小版本变化时，写死路径会导致 ModuleNotFoundError（如缺 uvicorn）。
+COPY --from=python-builder /install /tmp/python-packages
+RUN set -ex \
+    && SITE_PACKAGES="$(python -c 'import site; print(site.getsitepackages()[0])')" \
+    && mkdir -p "$SITE_PACKAGES" \
+    && cp -a /tmp/python-packages/. "$SITE_PACKAGES/" \
+    && rm -rf /tmp/python-packages \
+    && python -c "import uvicorn; print('uvicorn ok:', uvicorn.__version__)"
 
 # 复制应用代码
 COPY src/ ./src/
