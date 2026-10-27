@@ -18,7 +18,8 @@ services:
     networks:
       - danmu-net
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p$$MYSQL_ROOT_PASSWORD"]
+      # 必须用 CMD-SHELL，密码环境变量才会被展开；CMD 会把 $MYSQL_ROOT_PASSWORD 当成字面密码
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 12
