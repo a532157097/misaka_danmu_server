@@ -2,7 +2,8 @@ version: '3.8'
 
 services:
   mysql:
-    image: mysql:8.0
+    # 与已有 ./db-data 的数据字典版本一致（80100=8.1）；勿再用 8.0，否则会报 Cannot downgrade
+    image: mysql:8.1
     container_name: danmu-mysql
     restart: unless-stopped
     environment:
