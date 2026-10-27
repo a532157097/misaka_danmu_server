@@ -1,32 +1,56 @@
 version: '3.8'
 
 services:
+  mysql:
+    image: mysql:8.0
+    container_name: danmu-mysql
+    restart: unless-stopped
+    environment:
+      - MYSQL_ROOT_PASSWORD=${DB_ROOT_PASSWORD:-danmuapi_root}
+      - MYSQL_DATABASE=${DANMUAPI_DATABASE__NAME:-danmuapi}
+      - MYSQL_USER=${DANMUAPI_DATABASE__USER:-danmuapi}
+      - MYSQL_PASSWORD=${DANMUAPI_DATABASE__PASSWORD:-danmuapi}
+      - TZ=Asia/Shanghai
+    volumes:
+      - danmu-mysql-data:/var/lib/mysql
+      - ./config/mysql.cnf:/etc/mysql/conf.d/custom.cnf:ro
+    # 不对外暴露 3306，仅通过下方内部网络给 app 使用
+    networks:
+      - danmu-net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p$$MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
   app:
     # 使用本地 Dockerfile 构建镜像。
     build:
-      context: . # Dockerfile 将创建一个默认用户，权限由 entrypoint.sh 在运行时处理。
+      context: .
     # image: l429609201/danmu_api_server:latest # 如果您想使用自己推送的镜像，请取消注释此行并注释掉上面的 'build: .'
     container_name: danmu-api
     restart: unless-stopped
-    # 使用主机网络模式，容器将直接使用宿主机的网络。
-    # 这意味着容器内的 127.0.0.1 就是宿主机的 127.0.0.1。
-    # 应用将直接在宿主机的 7768 端口上可用，无需端口映射。
-    network_mode: "host"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    ports:
+      - "7768:7768"
     environment:
       # Pydantic-settings 会自动读取这些环境变量
       # 将 PUID/PGID 作为环境变量传递给容器，供 entrypoint.sh 使用
       - PUID=1000
       - PGID=1000
       - UMASK=0022 # 设置文件创建掩码，0022 是一个常见的安全默认值
-      # 服务配置 (端口在主机网络模式下由应用内部配置决定)
       - DANMUAPI_SERVER__HOST=0.0.0.0
       - DANMUAPI_SERVER__PORT=7768
-      # 数据库配置 - 连接到宿主机上的数据库
-      - DANMUAPI_DATABASE__HOST=127.0.0.1
+      # 数据库配置 - 连接到同 compose 网络内的 mysql 服务
+      - DANMUAPI_DATABASE__TYPE=mysql
+      - DANMUAPI_DATABASE__HOST=mysql
       - DANMUAPI_DATABASE__PORT=3306
-      - DANMUAPI_DATABASE__USER=danmuapi
-      - DANMUAPI_DATABASE__PASSWORD=danmuapi
-      - DANMUAPI_DATABASE__NAME=danmuapi
+      - DANMUAPI_DATABASE__USER=${DANMUAPI_DATABASE__USER:-danmuapi}
+      - DANMUAPI_DATABASE__PASSWORD=${DANMUAPI_DATABASE__PASSWORD:-danmuapi}
+      - DANMUAPI_DATABASE__NAME=${DANMUAPI_DATABASE__NAME:-danmuapi}
       # 新增：日志级别配置 (可选值: DEBUG, INFO, WARNING, ERROR)
       # - DANMUAPI_LOG__LEVEL=DEBUG
 
@@ -35,11 +59,6 @@ services:
       # 可选后端: memory（纯内存）/ redis / database（纯数据库）/ hybrid（默认）
       # - DANMUAPI_CACHE__BACKEND=redis
       # - DANMUAPI_CACHE__REDIS_URL=redis://:you_password@XXX:XXX:XXX:XXX:6379/6
-      # - DANMUAPI_CACHE__REDIS_MAX_MEMORY=256mb
-      # - DANMUAPI_CACHE__REDIS_SOCKET_TIMEOUT=30
-      # - DANMUAPI_CACHE__REDIS_SOCKET_CONNECT_TIMEOUT=5
-      # - DANMUAPI_CACHE__MEMORY_MAXSIZE=1024
-      # - DANMUAPI_CACHE__MEMORY_DEFAULT_TTL=600
 
       # JWT 配置 - 强烈建议在 .env 文件中设置一个强密钥
       #- DANMUAPI_JWT__SECRET_KEY=${JWT_SECRET_KEY:-a_very_secret_key_that_should_be_changed_in_prod}
@@ -51,14 +70,18 @@ services:
       # [可选] 映射 Docker socket，启用一键重启和更新功能
       # 如果不需要此功能，可以注释掉下面这行
       - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - danmu-net
 
-# Docker Socket 映射说明：
-# - 映射 Docker socket 后，可以通过 Web 界面一键重启和更新容器
-# - 如果不映射，重启功能将通过退出进程触发（依赖 restart: unless-stopped）
-# - 更新功能在不映射 socket 时不可用，需要手动执行 docker pull 和 docker-compose up -d
+networks:
+  danmu-net:
+    driver: bridge
 
-# 由于不再使用容器化的数据库，db 服务、volumes 和 networks 部分已被移除。
-# 请确保您的宿主机上已经运行了 MySQL 服务，并且：
-# 1. 监听在 127.0.0.1:3306。
-# 2. 创建了名为 'danmuapi' 的数据库。
-# 3. 创建了用户 'danmuapi'，密码为 'danmuapi'，并授予了对 'danmuapi' 数据库的访问权限。
+volumes:
+  danmu-mysql-data:
+
+# 说明：
+# - MySQL 不映射宿主机端口，只在 danmu-net 内给 app 使用。
+# - 首次启动会创建空库；表结构由应用启动时自动迁移。
+# - 数据库账号密码可通过同目录 .env 覆盖，参见 .env.example。
+# - Docker Socket 映射后，可通过 Web 界面一键重启容器；更新仍建议手动 build/up。
