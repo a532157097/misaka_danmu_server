@@ -27,10 +27,12 @@ services:
       start_period: 40s
 
   app:
-    # 使用本地 Dockerfile 构建镜像。
-    build:
-      context: .
-    # image: l429609201/danmu_api_server:latest # 如果您想使用自己推送的镜像，请取消注释此行并注释掉上面的 'build: .'
+    # 使用官方镜像，避免自建镜像流控签名校验失败导致无法下载弹幕。
+    # 本地修改的自动后备匹配修复通过下面两个文件挂载覆盖进容器。
+    image: l429609201/misaka_danmu_server:latest
+    # 若必须完全自建镜像，可改回：
+    # build:
+    #   context: .
     container_name: danmu-api
     restart: unless-stopped
     depends_on:
@@ -39,38 +41,23 @@ services:
     ports:
       - "7768:7768"
     environment:
-      # Pydantic-settings 会自动读取这些环境变量
-      # 将 PUID/PGID 作为环境变量传递给容器，供 entrypoint.sh 使用
       - PUID=1000
       - PGID=1000
-      - UMASK=0022 # 设置文件创建掩码，0022 是一个常见的安全默认值
+      - UMASK=0022
       - DANMUAPI_SERVER__HOST=0.0.0.0
       - DANMUAPI_SERVER__PORT=7768
-      # 数据库配置 - 连接到同 compose 网络内的 mysql 服务
       - DANMUAPI_DATABASE__TYPE=mysql
       - DANMUAPI_DATABASE__HOST=mysql
       - DANMUAPI_DATABASE__PORT=3306
       - DANMUAPI_DATABASE__USER=${DANMUAPI_DATABASE__USER:-danmuapi}
       - DANMUAPI_DATABASE__PASSWORD=${DANMUAPI_DATABASE__PASSWORD:-danmuapi}
       - DANMUAPI_DATABASE__NAME=${DANMUAPI_DATABASE__NAME:-danmuapi}
-      # 新增：日志级别配置 (可选值: DEBUG, INFO, WARNING, ERROR)
-      # - DANMUAPI_LOG__LEVEL=DEBUG
-
-      # 缓存配置
-      # 默认使用 hybrid 模式（内存 L1 + 数据库 L2），无需额外服务
-      # 可选后端: memory（纯内存）/ redis / database（纯数据库）/ hybrid（默认）
-      # - DANMUAPI_CACHE__BACKEND=redis
-      # - DANMUAPI_CACHE__REDIS_URL=redis://:you_password@XXX:XXX:XXX:XXX:6379/6
-
-      # JWT 配置 - 强烈建议在 .env 文件中设置一个强密钥
-      #- DANMUAPI_JWT__SECRET_KEY=${JWT_SECRET_KEY:-a_very_secret_key_that_should_be_changed_in_prod}
-      # 初始管理员配置
       - DANMUAPI_ADMIN__INITIAL_USER=admin
     volumes:
-      # 挂载 config 目录以持久化日志和配置文件。
       - ./config:/app/config
-      # [可选] 映射 Docker socket，启用一键重启和更新功能
-      # 如果不需要此功能，可以注释掉下面这行
+      # 覆盖官方镜像中的匹配/下载逻辑（集数偏移修复）
+      - ./src/api/dandan/comments.py:/app/src/api/dandan/comments.py:ro
+      - ./src/api/dandan/match.py:/app/src/api/dandan/match.py:ro
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - danmu-net
@@ -81,6 +68,8 @@ networks:
 
 # 说明：
 # - MySQL 数据目录挂载到项目下 ./db-data，不映射宿主机 3306，只在 danmu-net 内给 app 使用。
-# - 首次启动会创建空库；表结构由应用启动时自动迁移。
+# - app 使用官方镜像保证流控配置可验证；本地修复文件通过 bind mount 覆盖。
 # - 数据库账号密码可通过同目录 .env 覆盖，参见 .env.example。
-# - Docker Socket 映射后，可通过 Web 界面一键重启容器；更新仍建议手动 build/up。
+# - 拉取官方镜像若超时，可先：
+#   docker pull docker.1ms.run/l429609201/misaka_danmu_server:latest
+#   docker tag docker.1ms.run/l429609201/misaka_danmu_server:latest l429609201/misaka_danmu_server:latest
